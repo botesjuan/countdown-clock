@@ -170,7 +170,7 @@ hotspot) when it's away from the primary network, add it to `secrets.h`:
 
 ```cpp
 #define WIFI_SSID "MyHome"
-#define WIFI_PASS "***REMOVED-ROTATE-THIS-PASSWORD***"
+#define WIFI_PASS "yourpassword"
 
 #define WIFI_SSID2 "YourBackupSSID"
 #define WIFI_PASS2 "YourBackupPassword"
