@@ -438,19 +438,9 @@ void draw() {
   snprintf(sub, sizeof(sub), "%s work days", withCommas(st.workDays).c_str());
   printCentered(sub, 48, 1);
 
-  // --- Progress bar ---
-  int barX = 2, barY = 56, barW = 98, barH = 8;
-
-  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
-  int fillW = (int)((barW - 2) * (st.pct / 100.0));
-  if (fillW > 0) {
-    display.fillRect(barX + 1, barY + 1, fillW, barH - 2, SSD1306_WHITE);
-  }
-
-  display.setTextSize(1);
-  display.setCursor(barX + barW + 4, barY);
-  display.print(st.pct);
-  display.print("%");
+  // --- Line 5: web page IP, where the progress bar used to be ---
+  String ip = WiFi.localIP().toString();
+  printCentered(ip.c_str(), 56, 1);
 
   display.display();
 
