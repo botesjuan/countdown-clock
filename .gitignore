@@ -1,0 +1,11 @@
+# Credentials - never commit
+countdown_clock/secrets.h
+
+# Build output
+build/
+*.bin
+*.elf
+*.map
+
+# Burp / misc
+*.burp
