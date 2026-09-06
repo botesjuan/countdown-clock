@@ -16,6 +16,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266WebServer.h>
+#include <LittleFS.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -25,15 +26,18 @@
 
 // ============ CONFIGURE THIS SECTION ============
 
-// The finish line.
-const int TARGET_Y = 2037;
-const int TARGET_M = 6;
-const int TARGET_D = 6;
+// The finish line. These are just the defaults on first boot - once set from
+// the web page (see /set-target below), the real values live in LittleFS at
+// /target.txt and survive reboots/reflashes.
+int targetY = 2037;
+int targetM = 6;
+int targetD = 6;
 
-// When the countdown "started" - used only for the progress bar.
-const int START_Y = 2026;
-const int START_M = 8;
-const int START_D = 1;
+// When the countdown "started" - used only for the progress bar. Reset to
+// today automatically whenever a new target is set from the web page.
+int startY = 2026;
+int startM = 8;
+int startD = 1;
 
 // Working days per month, used to derive working days remaining.
 const double WORKDAYS_PER_MONTH = 21.0;
@@ -92,6 +96,34 @@ Status computeStatus() {
   return st;
 }
 
+// --- Persisted target/start date, so a new date set from the web page
+// survives a reboot instead of reverting to the compiled-in defaults. ---
+
+void saveTargetToFS() {
+  File f = LittleFS.open("/target.txt", "w");
+  if (!f) {
+    Serial.println(F("Failed to open /target.txt for writing."));
+    return;
+  }
+  f.printf("%d,%d,%d,%d,%d,%d\n", targetY, targetM, targetD, startY, startM, startD);
+  f.close();
+}
+
+void loadTargetFromFS() {
+  if (!LittleFS.exists("/target.txt")) return;
+  File f = LittleFS.open("/target.txt", "r");
+  if (!f) return;
+  String line = f.readStringUntil('\n');
+  f.close();
+
+  int ty, tm, td, sy, sm, sd;
+  if (sscanf(line.c_str(), "%d,%d,%d,%d,%d,%d", &ty, &tm, &td, &sy, &sm, &sd) == 6) {
+    targetY = ty; targetM = tm; targetD = td;
+    startY  = sy; startM  = sm; startD  = sd;
+    Serial.println(F("Loaded saved target date from LittleFS."));
+  }
+}
+
 // Build a local-midnight time_t from a calendar date.
 time_t makeLocalDate(int y, int m, int d) {
   struct tm t;
@@ -139,10 +171,61 @@ void showStatus(const char* line1, const char* line2) {
   display.display();
 }
 
+// --- Idle-screen easter egg: a little robot that walks across the panel.
+// Shown once every EASTER_EGG_EVERY one-minute refreshes, purely for
+// personality - not tied to any activity/idle sensor. ---
+
+const int EASTER_EGG_EVERY = 5;   // show the robot once every 5 minutes
+unsigned long refreshCount = 0;
+
+void drawRobot(int x, int y, bool frameA) {
+  // antenna
+  display.drawLine(x + 6, y - 3, x + 6, y, SSD1306_WHITE);
+  display.fillCircle(x + 6, y - 4, 1, SSD1306_WHITE);
+
+  // head, with two eye "holes" punched through
+  display.fillRoundRect(x + 2, y, 9, 7, 2, SSD1306_WHITE);
+  display.drawPixel(x + 4, y + 3, SSD1306_BLACK);
+  display.drawPixel(x + 8, y + 3, SSD1306_BLACK);
+
+  // body
+  display.fillRoundRect(x + 1, y + 8, 11, 8, 1, SSD1306_WHITE);
+
+  // arms
+  display.drawLine(x - 1, y + 9, x - 1, y + 14, SSD1306_WHITE);
+  display.drawLine(x + 13, y + 9, x + 13, y + 14, SSD1306_WHITE);
+
+  // legs, alternating for a walk cycle
+  if (frameA) {
+    display.drawLine(x + 3, y + 16, x + 1, y + 20, SSD1306_WHITE);
+    display.drawLine(x + 8, y + 16, x + 10, y + 20, SSD1306_WHITE);
+  } else {
+    display.drawLine(x + 3, y + 16, x + 5, y + 20, SSD1306_WHITE);
+    display.drawLine(x + 8, y + 16, x + 6, y + 20, SSD1306_WHITE);
+  }
+}
+
+void playRobotWalk() {
+  const int robotY = 20;  // keeps the ~20px-tall robot within the panel
+  bool frame = false;
+  for (int x = -14; x <= SCREEN_W + 14; x += 4) {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    drawRobot(x, robotY, frame);
+    display.display();
+    frame = !frame;
+    server.handleClient();  // stay responsive during the ~2.7s animation
+    delay(70);
+  }
+}
+
 // --- Light local web server: mirrors what's on the OLED ---
 
 void handleRoot() {
   Status st = computeStatus();
+  char dateVal[11];
+  snprintf(dateVal, sizeof(dateVal), "%04d-%02d-%02d", targetY, targetM, targetD);
+
   String html = F(
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -154,6 +237,9 @@ void handleRoot() {
     ".big{color:#55ccff;font-size:4em;margin:10px 0}"
     ".sub{color:#ffdd00;font-size:1.1em;margin:4px 0}"
     "progress{width:80%;height:18px}"
+    "form{margin-top:28px}"
+    "input[type=date]{font-size:1em;padding:5px;border-radius:4px;border:none}"
+    "button{font-size:1em;padding:5px 12px;margin-left:6px;border-radius:4px;border:none;background:#55ccff;cursor:pointer}"
     "</style></head><body>"
   );
   if (st.retired) {
@@ -165,8 +251,53 @@ void handleRoot() {
     html += "<div class='sub'>" + withCommas(st.workDays) + " work days</div>";
     html += "<progress value='" + String(st.pct) + "' max='100'></progress> " + String(st.pct) + "%";
   }
+  html += "<form method='POST' action='/set-target'>";
+  html += "<label>New target date: <input type='date' name='target' value='" + String(dateVal) + "'></label>";
+  html += "<button type='submit'>Set</button>";
+  html += "</form>";
   html += F("</body></html>");
   server.send(200, "text/html", html);
+}
+
+// Sets a new countdown target from the web form. The progress-bar "start"
+// date is reset to today, since the old start date has no meaning against a
+// brand new target. Persists to LittleFS so it survives a reboot.
+void handleSetTarget() {
+  if (!server.hasArg("target")) {
+    server.send(400, "text/plain", "Missing 'target' field.");
+    return;
+  }
+
+  int y, m, d;
+  bool ok = sscanf(server.arg("target").c_str(), "%d-%d-%d", &y, &m, &d) == 3
+            && y >= 1970 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  if (!ok) {
+    server.send(400, "text/plain", "Invalid date. Expected YYYY-MM-DD.");
+    return;
+  }
+
+  time_t now = time(nullptr);
+  struct tm* lt = localtime(&now);
+
+  targetY = y; targetM = m; targetD = d;
+  startY  = lt->tm_year + 1900;
+  startM  = lt->tm_mon + 1;
+  startD  = lt->tm_mday;
+
+  targetTime = makeLocalDate(targetY, targetM, targetD);
+  startTime  = makeLocalDate(startY, startM, startD);
+  snprintf(targetLabel, sizeof(targetLabel), "to %02d %s %d",
+           targetD, MONTHS[targetM - 1], targetY);
+
+  saveTargetToFS();
+
+  Serial.print(F("New target set: "));
+  Serial.println(targetLabel);
+
+  server.sendHeader("Location", "/");
+  server.send(303);
+
+  lastDraw = millis() - 60000;  // force an immediate OLED refresh
 }
 
 void handleStatusJson() {
@@ -187,6 +318,12 @@ void setup() {
   delay(100);
   Serial.println();
   Serial.println(F("Retirement Countdown Clock starting..."));
+
+  if (!LittleFS.begin()) {
+    Serial.println(F("LittleFS mount failed - target date won't persist across reboots."));
+  } else {
+    loadTargetFromFS();
+  }
 
   Wire.begin(PIN_SDA, PIN_SCL);
 
@@ -249,17 +386,18 @@ void setup() {
     ESP.restart();
   }
 
-  targetTime = makeLocalDate(TARGET_Y, TARGET_M, TARGET_D);
-  startTime  = makeLocalDate(START_Y, START_M, START_D);
+  targetTime = makeLocalDate(targetY, targetM, targetD);
+  startTime  = makeLocalDate(startY, startM, startD);
 
   snprintf(targetLabel, sizeof(targetLabel), "to %02d %s %d",
-           TARGET_D, MONTHS[TARGET_M - 1], TARGET_Y);
+           targetD, MONTHS[targetM - 1], targetY);
 
   Serial.print(F("Time synced: "));
   Serial.println(ctime(&now));
 
   server.on("/", handleRoot);
   server.on("/status.json", handleStatusJson);
+  server.on("/set-target", HTTP_POST, handleSetTarget);
   server.begin();
   Serial.print(F("Web server started: http://"));
   Serial.println(WiFi.localIP());
@@ -334,6 +472,11 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println(F("WiFi dropped, reconnecting..."));
       wifiMulti.run();  // falls back across every AP added in setup()
+    }
+
+    refreshCount++;
+    if (refreshCount % EASTER_EGG_EVERY == 0) {
+      playRobotWalk();
     }
     draw();
   }
